@@ -51,7 +51,8 @@ jobs:
             ~/go/bin
             ~/go/pkg/mod
             ~/.cache/go-build
-            ~/.local/nuclei-templates
+            ~/nuclei-templates
+            ~/.gf
           key: ${{ runner.os }}-or-tools-${{ env.TOOLS_CACHE_VER }}
           restore-keys: |
             ${{ runner.os }}-or-tools-
