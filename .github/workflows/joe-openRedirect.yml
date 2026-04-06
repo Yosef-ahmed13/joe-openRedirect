@@ -205,7 +205,46 @@ jobs:
             "https://raw.githubusercontent.com/coffinxp/nuclei-templates/main/openRedirect.yaml" \
             -o "$HOME/nuclei-templates/custom/openRedirect.yaml" || true
 
-          echo "✅ Template ready"
+          # ── Create Advanced Fuzzing Template (Nuclei v3) ──
+          cat << 'EOF' > "$HOME/nuclei-templates/custom/fuzz-or.yaml"
+          id: fuzz-openRedirect
+          info:
+            name: Open Redirect Fuzzing
+            author: joe
+            severity: medium
+            description: Fuzzes all query parameters for Open Redirect
+          http:
+            - method: GET
+              path:
+                - "{{BaseURL}}"
+              payloads:
+                or_payloads:
+                  - "https://bing.com"
+                  - "//bing.com"
+                  - "https:bing.com"
+              fuzzing:
+                - part: query
+                  type: replace
+                  mode: multiple
+                  fuzz:
+                    - "{{or_payloads}}"
+              redirects: false
+              matchers-condition: and
+              matchers:
+                - type: regex
+                  part: header
+                  regex:
+                    - '(?i)Location:\s*(https?:)?\/\/bing\.com'
+                - type: status
+                  status:
+                    - 301
+                    - 302
+                    - 303
+                    - 307
+                    - 308
+          EOF
+          
+          echo "✅ Templates ready"
 
           BATCH_ID="${{ steps.prep.outputs.batch_id }}"
           OUT="$RESULTS/openredirect_batch${BATCH_ID}.txt"
@@ -219,7 +258,7 @@ jobs:
             echo "🔍 Nuclei scanning $CANDS URL candidates..."
             nuclei \
               -l "$WORK/redirect_candidates.txt" \
-              -t "$HOME/nuclei-templates/custom/openRedirect.yaml" \
+              -t "$HOME/nuclei-templates/custom/" \
               -silent -no-color \
               -timeout 10 \
               -rl 100 \
@@ -232,7 +271,7 @@ jobs:
           echo "🔍 Nuclei scanning live hosts directly..."
           nuclei \
             -l "$WORK/live_hosts.txt" \
-            -t "$HOME/nuclei-templates/custom/openRedirect.yaml" \
+            -t "$HOME/nuclei-templates/custom/" \
             -silent -no-color \
             -timeout 10 \
             -rl 100 \
