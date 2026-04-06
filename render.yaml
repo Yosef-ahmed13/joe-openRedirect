@@ -1,10 +1,8 @@
 services:
   - type: web
-    name: joe-or-bot
+    name: joe-openRedirect
     env: go
-    plan: Free
-    region: frankfurt
-    buildCommand: go build -o bot .
+    buildCommand: go build -o bot
     startCommand: ./bot
     envVars:
       - key: TELEGRAM_BOT_TOKEN
@@ -15,5 +13,3 @@ services:
         sync: false
       - key: GITHUB_REPO
         sync: false
-
-        
