@@ -70,6 +70,7 @@ jobs:
 
           install_go_tool github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           install_go_tool github.com/projectdiscovery/httpx/cmd/httpx@latest
+          install_go_tool github.com/projectdiscovery/katana/cmd/katana@latest
           install_go_tool github.com/tomnomnom/anew@latest
           install_go_tool github.com/lc/gau/v2/cmd/gau@latest
           install_go_tool github.com/tomnomnom/waybackurls@latest
@@ -141,6 +142,14 @@ jobs:
             # Waybackurls
             if command -v waybackurls &>/dev/null; then
               echo "$domain" | waybackurls 2>/dev/null \
+                | anew "$ALL_URLS" || true
+            fi
+            
+            # Katana — Active crawling (Important for targets like Gruyere)
+            if command -v katana &>/dev/null; then
+              katana -u "https://$domain" -d 3 -jc -kf all -silent -nc 2>/dev/null \
+                | anew "$ALL_URLS" || true
+              katana -u "http://$domain" -d 3 -jc -kf all -silent -nc 2>/dev/null \
                 | anew "$ALL_URLS" || true
             fi
 
@@ -222,6 +231,11 @@ jobs:
                   - "https://bing.com"
                   - "//bing.com"
                   - "https:bing.com"
+                  - "https://example.com"
+                  - "//example.com"
+                  - "https:example.com"
+                  - "\\/\\/example.com"
+                  - "https://example.com%2F"
               fuzzing:
                 - part: query
                   type: replace
@@ -234,7 +248,7 @@ jobs:
                 - type: regex
                   part: header
                   regex:
-                    - '(?i)Location:\s*(https?:)?\/\/bing\.com'
+                    - '(?i)Location:\s*(https?:)?\/\/(bing|example)\.com'
                 - type: status
                   status:
                     - 301
