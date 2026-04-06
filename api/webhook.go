@@ -206,7 +206,7 @@ func handleTextOrCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	if cmd == "openredirect" {
 		domains := parseDomains(args)
 		if len(domains) > 0 {
-			go dispatchDomains(bot, domains)
+			dispatchDomains(bot, domains)
 		} else {
 			sendHTML(bot, "⚠️ <b>Usage:</b>\n<code>/openRedirect target.com</code>")
 		}
@@ -214,37 +214,35 @@ func handleTextOrCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 
 	if cmd == "status" {
-		go func() {
-			url := fmt.Sprintf("%s/repos/%s/actions/runs?per_page=1&event=repository_dispatch", GH_API_BASE, getEnv("GITHUB_REPO", ""))
-			req, _ := http.NewRequest("GET", url, nil)
-			req.Header.Set("Authorization", "token "+os.Getenv("GH_TOKEN"))
-			
-			client := &http.Client{Timeout: 10 * time.Second}
-			resp, err := client.Do(req)
-			if err != nil || resp.StatusCode != 200 {
-				sendHTML(bot, "❌ GitHub API error")
-				return
-			}
-			defer resp.Body.Close()
+		url := fmt.Sprintf("%s/repos/%s/actions/runs?per_page=1&event=repository_dispatch", GH_API_BASE, getEnv("GITHUB_REPO", ""))
+		req, _ := http.NewRequest("GET", url, nil)
+		req.Header.Set("Authorization", "token "+os.Getenv("GH_TOKEN"))
+		
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil || resp.StatusCode != 200 {
+			sendHTML(bot, "❌ GitHub API error")
+			return
+		}
+		defer resp.Body.Close()
 
-			var result struct {
-				WorkflowRuns []struct {
-					ID         int64  `json:"id"`
-					Status     string `json:"status"`
-					Conclusion string `json:"conclusion"`
-					CreatedAt  string `json:"created_at"`
-					HTMLURL    string `json:"html_url"`
-				} `json:"workflow_runs"`
-			}
-			json.NewDecoder(resp.Body).Decode(&result)
-			if len(result.WorkflowRuns) == 0 {
-				sendHTML(bot, "❌ No workflow runs found.")
-				return
-			}
+		var result struct {
+			WorkflowRuns []struct {
+				ID         int64  `json:"id"`
+				Status     string `json:"status"`
+				Conclusion string `json:"conclusion"`
+				CreatedAt  string `json:"created_at"`
+				HTMLURL    string `json:"html_url"`
+			} `json:"workflow_runs"`
+		}
+		json.NewDecoder(resp.Body).Decode(&result)
+		if len(result.WorkflowRuns) == 0 {
+			sendHTML(bot, "❌ No workflow runs found.")
+			return
+		}
 
-			run := result.WorkflowRuns[0]
-			sendHTML(bot, fmt.Sprintf("<b>Latest Run:</b> #%d\n📋 Status: %s\n🏁 Result: %s\n🔗 <a href='%s'>View on GitHub</a>", run.ID, run.Status, run.Conclusion, run.HTMLURL))
-		}()
+		run := result.WorkflowRuns[0]
+		sendHTML(bot, fmt.Sprintf("<b>Latest Run:</b> #%d\n📋 Status: %s\n🏁 Result: %s\n🔗 <a href='%s'>View on GitHub</a>", run.ID, run.Status, run.Conclusion, run.HTMLURL))
 		return
 	}
 
@@ -256,7 +254,7 @@ func handleTextOrCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	// Just raw domains
 	domains := parseDomains(text)
 	if len(domains) > 0 {
-		go dispatchDomains(bot, domains)
+		dispatchDomains(bot, domains)
 	} else {
 		sendHTML(bot, "💬 Send /openRedirect <domain> or a .txt file.")
 	}
@@ -269,7 +267,7 @@ func handleFile(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 
 	sendHTML(bot, "📥 File received! Processing...")
-	go func() {
+	func() {
 		fileURL, err := bot.GetFileDirectURL(msg.Document.FileID)
 		if err != nil {
 			sendHTML(bot, "❌ Failed to get file URL")
