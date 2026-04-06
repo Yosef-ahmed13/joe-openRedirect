@@ -1,0 +1,18 @@
+services:
+- type: web
+  name: joe-or-bot
+    runtime: go
+      plan: free
+        region: frankfurt
+          buildCommand: go build -o bot .
+            startCommand: ./bot
+              envVars:
+                - key: TELEGRAM_BOT_TOKEN
+                    sync: false
+                      - key: TELEGRAM_CHAT_ID
+                          sync: false
+                            - key: GH_TOKEN
+                                sync: false
+                                  - key: GITHUB_REPO
+                                      sync: false
+                                      
