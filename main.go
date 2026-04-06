@@ -115,7 +115,7 @@ func isAuthorized(update tgbotapi.Update) bool {
 }
 
 // ─── DOMAIN HELPERS ────────────────────────────────────────────────
-var domainRe = regexp.MustCompile(`(?i)^(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$`)
+var domainRe = regexp.MustCompile(`(?i)^(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}(?:/[^\s]*)?$`)
 
 func parseDomains(raw string) []string {
 	var domains []string
@@ -130,10 +130,10 @@ func parseDomains(raw string) []string {
 		d = strings.TrimPrefix(d, "https://")
 		d = strings.TrimPrefix(d, "http://")
 		d = strings.TrimPrefix(d, "www.")
-		// strip trailing path
-		if idx := strings.Index(d, "/"); idx != -1 {
-			d = d[:idx]
-		}
+		// Do not strip the trailing path, allow seed URLs
+		// if idx := strings.Index(d, "/"); idx != -1 {
+		// 	d = d[:idx]
+		// }
 		if d == "" || strings.HasPrefix(d, "#") {
 			continue
 		}

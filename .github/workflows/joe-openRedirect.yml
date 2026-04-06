@@ -169,7 +169,7 @@ jobs:
           CLEAN=$(wc -l < "$WORK/clean_urls.txt" 2>/dev/null || echo 0)
           echo "✅ Deduplicated URLs: $CLEAN"
 
-          # ── GF filter for redirect params ──
+          # ── Filter and Inject Redirect Parameters ──
           if command -v gf &>/dev/null && [[ $CLEAN -gt 0 ]]; then
             mkdir -p ~/.gf
             git clone -q https://github.com/tomnomnom/gf.git /tmp/gf-repo 2>/dev/null && \
@@ -178,17 +178,26 @@ jobs:
               cp /tmp/gf-ex/*.json ~/.gf/ 2>/dev/null || true
 
             gf redirect "$WORK/clean_urls.txt" 2>/dev/null \
-              > "$WORK/redirect_candidates.txt" || \
-              cp "$WORK/clean_urls.txt" "$WORK/redirect_candidates.txt"
-          else
-            # Fallback: grep common redirect params
-            grep -iE "(url=|redirect=|next=|return=|goto=|dest=|destination=|rurl=|target=|redir=|redirect_url=|return_url=|forward=|location=)" \
-              "$WORK/clean_urls.txt" 2>/dev/null > "$WORK/redirect_candidates.txt" || \
-              cp "$WORK/clean_urls.txt" "$WORK/redirect_candidates.txt" || true
+              > "$WORK/redirect_candidates.txt" || true
           fi
 
+          # Force append common hidden redirect parameters to all discovered URLs
+          # Because many apps (like Gruyere) don't expose their redirect params until you login
+          cat "$WORK/clean_urls.txt" 2>/dev/null | awk '{print $1}' | while read url; do
+            # Add parameters only if the URL doesn't already have them
+            if [[ "$url" != *"?"* ]]; then
+              for param in continue next url return redirect goto dest destination rurl target redir return_url forward window location; do
+                echo "${url}?${param}=" >> "$WORK/redirect_candidates.txt"
+              done
+            fi
+            echo "$url" >> "$WORK/redirect_candidates.txt"
+          done
+
+          # Deduplicate again just in case
+          sort -u "$WORK/redirect_candidates.txt" -o "$WORK/redirect_candidates.txt"
+
           CANDS=$(wc -l < "$WORK/redirect_candidates.txt" 2>/dev/null || echo 0)
-          echo "🎯 Redirect parameter candidates: $CANDS"
+          echo "🎯 URLs with redirect parameters injected: $CANDS"
 
           # Also probe live hosts directly
           httpx -l /tmp/or_work/domains.txt \
