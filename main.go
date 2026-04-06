@@ -407,6 +407,19 @@ func main() {
 	// Parse CHAT_ID
 	fmt.Sscanf(CHAT_ID_STR, "%d", &CHAT_ID)
 
+	// Cloud Health Check HTTP Server (For Render / Koyeb)
+	port := getEnv("PORT", "8080")
+	go func() {
+		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("🟢 joe-openRedirect Bot is running!"))
+		})
+		fmt.Printf("🌐 Starting cloud health check server on port :%s\n", port)
+		if err := http.ListenAndServe(":"+port, nil); err != nil {
+			log.Printf("HTTP server error: %v", err)
+		}
+	}()
+
 	fmt.Println(`
 ╔══════════════════════════════════════════════╗
 ║  joe-openRedirect — Telegram Bot             ║
