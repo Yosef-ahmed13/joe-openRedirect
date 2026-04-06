@@ -1,0 +1,414 @@
+name: 🎯 joe-openRedirect — Open Redirect Scanner
+
+on:
+  repository_dispatch:
+    types: [open-redirect]
+  workflow_dispatch:
+    inputs:
+      domains:
+        description: 'Domain(s) — comma-separated or single'
+        required: true
+        type: string
+      batch_id:
+        description: 'Batch number'
+        required: false
+        default: '1'
+        type: string
+      total_batches:
+        description: 'Total batches'
+        required: false
+        default: '1'
+        type: string
+
+env:
+  GO_VERSION: '1.22'
+  TOOLS_CACHE_VER: 'or-v3'
+
+jobs:
+  open-redirect-scan:
+    name: 🔍 Open Redirect Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      # ─────────────────────────────────────────────
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      # ─────────────────────────────────────────────
+      - name: 🐹 Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      # ─────────────────────────────────────────────
+      - name: 📦 Cache Tools
+        id: cache-tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/bin
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            ~/.local/nuclei-templates
+          key: ${{ runner.os }}-or-tools-${{ env.TOOLS_CACHE_VER }}
+          restore-keys: |
+            ${{ runner.os }}-or-tools-
+
+      # ─────────────────────────────────────────────
+      - name: 🔧 Install Tools (if not cached)
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        run: |
+          echo "📦 Installing Go security tools..."
+
+          install_go_tool() {
+            echo "  → Installing $1"
+            go install "$1" 2>/dev/null || echo "  ⚠️ Failed: $1"
+          }
+
+          install_go_tool github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          install_go_tool github.com/projectdiscovery/httpx/cmd/httpx@latest
+          install_go_tool github.com/tomnomnom/anew@latest
+          install_go_tool github.com/lc/gau/v2/cmd/gau@latest
+          install_go_tool github.com/tomnomnom/waybackurls@latest
+          install_go_tool github.com/tomnomnom/uro@latest
+          install_go_tool github.com/tomnomnom/gf@latest
+          install_go_tool github.com/tomnomnom/qsreplace@latest
+
+          echo "✅ Go tools installed"
+          ls ~/go/bin/
+
+      # ─────────────────────────────────────────────
+      - name: 🌐 Install System Tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq curl jq python3 wget 2>/dev/null || true
+          echo "✅ System tools ready"
+
+      # ─────────────────────────────────────────────
+      - name: 📋 Prepare Domain List & Metadata
+        id: prep
+        run: |
+          mkdir -p /tmp/or_work /tmp/or_results
+
+          # ── Pull inputs ──
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            DOMAINS_RAW="${{ github.event.client_payload.domains }}"
+            BATCH_ID="${{ github.event.client_payload.batch_id }}"
+            TOTAL_BATCHES="${{ github.event.client_payload.total_batches }}"
+          else
+            DOMAINS_RAW="${{ github.event.inputs.domains }}"
+            BATCH_ID="${{ github.event.inputs.batch_id }}"
+            TOTAL_BATCHES="${{ github.event.inputs.total_batches }}"
+          fi
+
+          # ── Write domain list ──
+          echo "$DOMAINS_RAW" | tr ',' '\n' | sed 's/^ *//;s/ *$//;/^$/d' \
+            | sort -u > /tmp/or_work/domains.txt
+
+          TOTAL=$(wc -l < /tmp/or_work/domains.txt)
+          PREVIEW=$(head -3 /tmp/or_work/domains.txt | tr '\n' ',' | sed 's/,$//')
+
+          echo "batch_id=$BATCH_ID"         >> $GITHUB_OUTPUT
+          echo "total_batches=$TOTAL_BATCHES" >> $GITHUB_OUTPUT
+          echo "total_domains=$TOTAL"        >> $GITHUB_OUTPUT
+          echo "preview=$PREVIEW"            >> $GITHUB_OUTPUT
+
+          echo "📋 Domains to scan: $TOTAL (Batch $BATCH_ID/$TOTAL_BATCHES)"
+          cat /tmp/or_work/domains.txt
+
+      # ─────────────────────────────────────────────
+      - name: 🔗 Collect URLs (GAU + Wayback + httpx)
+        run: |
+          export PATH="$PATH:$HOME/go/bin"
+          WORK=/tmp/or_work
+          ALL_URLS="$WORK/all_urls.txt"
+          > "$ALL_URLS"
+
+          echo "🕷️ Collecting URLs for each domain..."
+
+          while IFS= read -r domain; do
+            echo "  → $domain"
+
+            # GAU — historical URLs from wayback/commoncrawl
+            if command -v gau &>/dev/null; then
+              gau --subs --timeout 30 "$domain" 2>/dev/null \
+                | anew "$ALL_URLS" || true
+            fi
+
+            # Waybackurls
+            if command -v waybackurls &>/dev/null; then
+              echo "$domain" | waybackurls 2>/dev/null \
+                | anew "$ALL_URLS" || true
+            fi
+
+          done < /tmp/or_work/domains.txt
+
+          TOTAL_URLS=$(wc -l < "$ALL_URLS" 2>/dev/null || echo 0)
+          echo "🔗 Total raw URLs collected: $TOTAL_URLS"
+
+          # ── Deduplicate ──
+          if command -v uro &>/dev/null && [[ $TOTAL_URLS -gt 0 ]]; then
+            uro -i "$ALL_URLS" -o "$WORK/clean_urls.txt" 2>/dev/null \
+              || sort -u "$ALL_URLS" > "$WORK/clean_urls.txt"
+          else
+            sort -u "$ALL_URLS" > "$WORK/clean_urls.txt"
+          fi
+
+          CLEAN=$(wc -l < "$WORK/clean_urls.txt" 2>/dev/null || echo 0)
+          echo "✅ Deduplicated URLs: $CLEAN"
+
+          # ── GF filter for redirect params ──
+          if command -v gf &>/dev/null && [[ $CLEAN -gt 0 ]]; then
+            mkdir -p ~/.gf
+            git clone -q https://github.com/tomnomnom/gf.git /tmp/gf-repo 2>/dev/null && \
+              cp /tmp/gf-repo/examples/*.json ~/.gf/ 2>/dev/null || true
+            git clone -q https://github.com/1ndianl33t/Gf-Patterns.git /tmp/gf-ex 2>/dev/null && \
+              cp /tmp/gf-ex/*.json ~/.gf/ 2>/dev/null || true
+
+            gf redirect "$WORK/clean_urls.txt" 2>/dev/null \
+              > "$WORK/redirect_candidates.txt" || \
+              cp "$WORK/clean_urls.txt" "$WORK/redirect_candidates.txt"
+          else
+            # Fallback: grep common redirect params
+            grep -iE "(url=|redirect=|next=|return=|goto=|dest=|destination=|rurl=|target=|redir=|redirect_url=|return_url=|forward=|location=)" \
+              "$WORK/clean_urls.txt" 2>/dev/null > "$WORK/redirect_candidates.txt" || \
+              cp "$WORK/clean_urls.txt" "$WORK/redirect_candidates.txt" || true
+          fi
+
+          CANDS=$(wc -l < "$WORK/redirect_candidates.txt" 2>/dev/null || echo 0)
+          echo "🎯 Redirect parameter candidates: $CANDS"
+
+          # Also probe live hosts directly
+          httpx -l /tmp/or_work/domains.txt \
+            -silent -follow-redirects -timeout 10 \
+            -o "$WORK/live_hosts.txt" 2>/dev/null || true
+
+      # ─────────────────────────────────────────────
+      - name: ☢️ Run Nuclei — Open Redirect Template
+        run: |
+          export PATH="$PATH:$HOME/go/bin"
+          WORK=/tmp/or_work
+          RESULTS=/tmp/or_results
+
+          # ── Update / fetch nuclei templates ──
+          nuclei -update-templates -silent 2>/dev/null || true
+
+          # ── Download coffinxp custom openRedirect template ──
+          mkdir -p "$HOME/nuclei-templates/custom"
+          wget -q -O "$HOME/nuclei-templates/custom/openRedirect.yaml" \
+            "https://raw.githubusercontent.com/coffinxp/nuclei-templates/main/openRedirect.yaml" \
+            2>/dev/null || \
+          curl -sL \
+            "https://raw.githubusercontent.com/coffinxp/nuclei-templates/main/openRedirect.yaml" \
+            -o "$HOME/nuclei-templates/custom/openRedirect.yaml" || true
+
+          echo "✅ Template ready"
+
+          BATCH_ID="${{ steps.prep.outputs.batch_id }}"
+          OUT="$RESULTS/openredirect_batch${BATCH_ID}.txt"
+          OUT_JSON="$RESULTS/openredirect_batch${BATCH_ID}.json"
+          > "$OUT"
+          > "$OUT_JSON"
+
+          # ── Scan URL candidates ──
+          CANDS=$(wc -l < "$WORK/redirect_candidates.txt" 2>/dev/null || echo 0)
+          if [[ $CANDS -gt 0 ]]; then
+            echo "🔍 Nuclei scanning $CANDS URL candidates..."
+            nuclei \
+              -l "$WORK/redirect_candidates.txt" \
+              -t "$HOME/nuclei-templates/custom/openRedirect.yaml" \
+              -silent -no-color \
+              -timeout 10 \
+              -rl 100 \
+              -c 50 \
+              -jsonl \
+              -o "$OUT_JSON" 2>/dev/null || true
+          fi
+
+          # ── Also scan domains directly ──
+          echo "🔍 Nuclei scanning live hosts directly..."
+          nuclei \
+            -l "$WORK/live_hosts.txt" \
+            -t "$HOME/nuclei-templates/custom/openRedirect.yaml" \
+            -silent -no-color \
+            -timeout 10 \
+            -rl 100 \
+            -c 50 \
+            -jsonl \
+            -jsonl-export "$OUT_JSON.hosts" 2>/dev/null || true
+
+          # Merge json results
+          cat "$OUT_JSON.hosts" 2>/dev/null >> "$OUT_JSON" || true
+
+          echo "✅ Nuclei scan complete"
+          echo "📊 Raw JSON results: $(wc -l < "$OUT_JSON" 2>/dev/null || echo 0) findings"
+
+      # ─────────────────────────────────────────────
+      - name: 📊 Parse & Score Results
+        id: parse
+        run: |
+          RESULTS=/tmp/or_results
+          BATCH_ID="${{ steps.prep.outputs.batch_id }}"
+          TOTAL_BATCHES="${{ steps.prep.outputs.total_batches }}"
+          JSON_FILE="$RESULTS/openredirect_batch${BATCH_ID}.json"
+          REPORT="$RESULTS/report_batch${BATCH_ID}.txt"
+
+          > "$REPORT"
+
+          # Severity → score mapping
+          score_for_severity() {
+            case "${1,,}" in
+              critical) echo "10" ;;
+              high)     echo "8"  ;;
+              medium)   echo "6"  ;;
+              low)      echo "4"  ;;
+              info)     echo "2"  ;;
+              *)        echo "5"  ;;
+            esac
+          }
+
+          cat >> "$REPORT" << 'EOF'
+          ╔══════════════════════════════════════════════════════╗
+          ║        joe-openRedirect — Scan Report                ║
+          ╚══════════════════════════════════════════════════════╝
+          EOF
+
+          echo "" >> "$REPORT"
+          echo "📅 Date     : $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$REPORT"
+          echo "📦 Batch    : ${BATCH_ID}/${TOTAL_BATCHES}" >> "$REPORT"
+          echo "🎯 Targets  : ${{ steps.prep.outputs.preview }}" >> "$REPORT"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >> "$REPORT"
+          echo "" >> "$REPORT"
+
+          TOTAL_FINDINGS=0
+          if [[ -s "$JSON_FILE" ]]; then
+            while IFS= read -r line; do
+              URL=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('matched-at','') or d.get('host',''))" 2>/dev/null || echo "")
+              TEMPLATE=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('template-id',''))" 2>/dev/null || echo "open-redirect")
+              SEVERITY=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('info',{}).get('severity','medium'))" 2>/dev/null || echo "medium")
+              DESC=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('info',{}).get('description','Open Redirect vulnerability detected'))" 2>/dev/null || echo "Open Redirect vulnerability detected")
+              SCORE=$(score_for_severity "$SEVERITY")
+
+              if [[ -n "$URL" ]]; then
+                TOTAL_FINDINGS=$((TOTAL_FINDINGS + 1))
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >> "$REPORT"
+                echo "🔗 URL         : $URL" >> "$REPORT"
+                echo "🎭 Template    : $TEMPLATE" >> "$REPORT"
+                echo "📝 Description : $DESC" >> "$REPORT"
+                echo "⚠️  Severity    : $(echo $SEVERITY | tr '[:lower:]' '[:upper:]')" >> "$REPORT"
+                echo "🔢 Score       : $SCORE / 10" >> "$REPORT"
+              fi
+            done < "$JSON_FILE"
+          fi
+
+          echo "" >> "$REPORT"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >> "$REPORT"
+          echo "📊 TOTAL FINDINGS: $TOTAL_FINDINGS" >> "$REPORT"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >> "$REPORT"
+
+          if [[ $TOTAL_FINDINGS -eq 0 ]]; then
+            echo "" >> "$REPORT"
+            echo "✅ No open redirect vulnerabilities found in this batch." >> "$REPORT"
+          fi
+
+          echo "total_findings=$TOTAL_FINDINGS" >> $GITHUB_OUTPUT
+          echo "report=$REPORT" >> $GITHUB_OUTPUT
+
+          echo "✅ Report generated: $TOTAL_FINDINGS findings"
+          cat "$REPORT"
+
+      # ─────────────────────────────────────────────
+      - name: 📤 Send Results to Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          RESULTS=/tmp/or_results
+          BATCH_ID="${{ steps.prep.outputs.batch_id }}"
+          TOTAL_BATCHES="${{ steps.prep.outputs.total_batches }}"
+          FINDINGS="${{ steps.parse.outputs.total_findings }}"
+          REPORT="${{ steps.parse.outputs.report }}"
+          PREVIEW="${{ steps.prep.outputs.preview }}"
+          TOTAL_DOMAINS="${{ steps.prep.outputs.total_domains }}"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          TG_API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
+
+          # ── Send summary message ──
+          if [[ "$FINDINGS" -gt 0 ]]; then
+            EMOJI="🚨"
+            STATUS_TEXT="VULNERABILITIES FOUND!"
+          else
+            EMOJI="✅"
+            STATUS_TEXT="No vulnerabilities found"
+          fi
+
+          MSG="$(cat <<EOF
+          ${EMOJI} <b>Open Redirect Scan — Batch ${BATCH_ID}/${TOTAL_BATCHES}</b>
+          ━━━━━━━━━━━━━━━━━━━━━━━━
+          🎯 Targets: <code>${PREVIEW}</code>
+          📋 Domains: <b>${TOTAL_DOMAINS}</b>
+          💥 Findings: <b>${FINDINGS}</b>
+          📊 Status: <b>${STATUS_TEXT}</b>
+          ━━━━━━━━━━━━━━━━━━━━━━━━
+          🔗 <a href='${RUN_URL}'>View on GitHub Actions</a>
+          EOF
+          )"
+
+          curl -s -X POST "${TG_API}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"chat_id\": \"${TELEGRAM_CHAT_ID}\",
+              \"text\": $(echo "$MSG" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+              \"parse_mode\": \"HTML\",
+              \"disable_web_page_preview\": true
+            }" > /dev/null
+
+          # ── Send report file ──
+          if [[ -f "$REPORT" ]]; then
+            CAPTION="📄 Open Redirect Report — Batch ${BATCH_ID}/${TOTAL_BATCHES} | ${FINDINGS} finding(s) | $(date -u '+%Y-%m-%d %H:%M UTC')"
+            curl -s -X POST "${TG_API}/sendDocument" \
+              -F "chat_id=${TELEGRAM_CHAT_ID}" \
+              -F "document=@${REPORT}" \
+              -F "caption=${CAPTION}" > /dev/null
+            echo "✅ Report sent to Telegram!"
+          fi
+
+          # ── Final message if this is the last batch ──
+          if [[ "$BATCH_ID" == "$TOTAL_BATCHES" ]]; then
+            curl -s -X POST "${TG_API}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"chat_id\": \"${TELEGRAM_CHAT_ID}\",
+                \"text\": \"🏁 <b>All batches complete!</b>\\n━━━━━━━━━━━━━━━━━━━━━━\\n✅ Batch ${TOTAL_BATCHES}/${TOTAL_BATCHES} finished\\n⏰ $(date -u '+%Y-%m-%d %H:%M UTC')\\n🔗 <a href='https://github.com/${{ github.repository }}/actions'>View All Runs</a>\",
+                \"parse_mode\": \"HTML\",
+                \"disable_web_page_preview\": true
+              }" > /dev/null
+          fi
+
+      # ─────────────────────────────────────────────
+      - name: 📤 Upload Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: openredirect-results-run${{ github.run_id }}-batch${{ steps.prep.outputs.batch_id }}
+          path: /tmp/or_results/
+          retention-days: 14
+
+      # ─────────────────────────────────────────────
+      - name: 📊 GitHub Step Summary
+        if: always()
+        run: |
+          echo "## 🎯 joe-openRedirect Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🎯 Targets | \`${{ steps.prep.outputs.preview }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📋 Domains | ${{ steps.prep.outputs.total_domains }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📦 Batch | ${{ steps.prep.outputs.batch_id }} / ${{ steps.prep.outputs.total_batches }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 💥 Findings | ${{ steps.parse.outputs.total_findings }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| ⏰ Run ID | ${{ github.run_id }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> 📥 Download the full report from **Artifacts** above" >> $GITHUB_STEP_SUMMARY
